@@ -55,7 +55,7 @@ jobs:
     steps:
       - name: 🔒 检查敏感文件修改
         id: check_sensitive
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         env:
           PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
         with:
@@ -173,7 +173,7 @@ jobs:
 
     steps:
       - name: 🏷️ 添加标签
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         env:
           PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
         with:
@@ -246,7 +246,7 @@ jobs:
           path: .
 
       - name: 💬 生成审查报告
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         env:
           PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
           AI_REVIEW_RESULT: ${{ needs.ai-review.result }}
