@@ -35,16 +35,11 @@ def _share_image_branding(config: object) -> ShareImageBranding:
 
 
 def _resolve_playwright_command() -> Optional[str]:
-    """Resolve a global or repository-local Playwright CLI executable."""
+    """Resolve a globally installed Playwright CLI executable."""
     command = shutil.which("playwright")
     if command:
         return command
 
-    repository_root = Path(__file__).resolve().parent.parent
-    executable_name = "playwright.cmd" if os.name == "nt" else "playwright"
-    local_command = repository_root / "apps" / "dsa-web" / "node_modules" / ".bin" / executable_name
-    if local_command.is_file():
-        return str(local_command)
     return None
 
 
@@ -57,8 +52,7 @@ def _markdown_to_image_playwright(
     playwright_command = _resolve_playwright_command()
     if playwright_command is None:
         logger.warning(
-            "Playwright CLI not found. Install Web dependencies with: "
-            "cd apps/dsa-web && npm ci. Fallback to text."
+            "Playwright CLI not found. Falling back to text."
         )
         return None
 

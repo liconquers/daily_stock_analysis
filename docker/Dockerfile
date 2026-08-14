@@ -3,20 +3,6 @@
 # ===================================
 # A股自选股智能分析系统 - Docker 镜像
 # ===================================
-# 多阶段构建：前端打包 + 后端运行
-
-FROM node:20-slim AS web-builder
-
-WORKDIR /app/apps/dsa-web
-ARG DSA_WEB_VERSION=0.0.0
-ARG DSA_WEB_REVISION=unknown
-
-COPY apps/dsa-web/package.json apps/dsa-web/package-lock.json ./
-RUN --mount=type=cache,target=/root/.npm npm ci
-
-COPY apps/dsa-web/ ./
-RUN DSA_WEB_VERSION="${DSA_WEB_VERSION}" DSA_WEB_REVISION="${DSA_WEB_REVISION}" npm run build
-
 # Pin to bookworm: wkhtmltopdf was removed from Debian testing (2025)
 FROM python:3.11-slim-bookworm
 
@@ -51,12 +37,10 @@ RUN --mount=type=cache,target=/root/.cache/pip pip install -r requirements.txt
 
 # 复制应用代码
 COPY *.py ./
-COPY api/ ./api/
 COPY data_provider/ ./data_provider/
 COPY bot/ ./bot/
 COPY src/ ./src/
 COPY strategies/ ./strategies/
-COPY --from=web-builder /app/static ./static/
 COPY docker/entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
 # Verify globally bundled runtime dependencies without leaving SDK logs in the image.
@@ -81,19 +65,8 @@ RUN EF_DATA_DIR="$(python -c 'import efinance, pathlib; print(pathlib.Path(efina
 ENV PYTHONUNBUFFERED=1
 ENV LOG_DIR=/app/logs
 ENV DATABASE_PATH=/app/data/stock_analysis.db
-# Web/API service
-ENV WEBUI_HOST=0.0.0.0
-ENV API_PORT=8000
-
-# 暴露 API 端口
-EXPOSE 8000
-
 # 数据卷（持久化数据）
 VOLUME ["/app/data", "/app/logs", "/app/reports"]
-
-# 健康检查（FastAPI 模式）
-HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
-    CMD curl --fail --silent --show-error http://localhost:8000/api/health >/dev/null
 
 # 启动入口先修复 bind mount 目录权限，再降权为 dsa 执行应用；
 # 文档化 docker-compose exec 命令需显式使用 -u dsa，避免手动进程写入 root-owned 文件。

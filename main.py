@@ -69,7 +69,6 @@ import time
 import uuid
 from datetime import date, datetime, timezone, timedelta
 
-from src.webui_frontend import prepare_webui_frontend_assets
 from src.config import get_config, Config
 from src.logging_config import setup_logging
 from src.brokers.futu.portfolio import FutuPortfolioError
@@ -80,41 +79,11 @@ from src.services.stock_code_utils import resolve_index_stock_code_for_analysis
 
 logger = logging.getLogger(__name__)
 _RUNTIME_ENV_FILE_KEYS = set()
-_PUBLIC_BIND_HOSTS = frozenset({"0.0.0.0", "::", "[::]", "*"})
-
-
 def _get_active_env_path() -> Path:
     env_file = os.getenv("ENV_FILE")
     if env_file:
         return Path(env_file)
     return Path(__file__).resolve().parent / ".env"
-
-
-def _is_public_bind_host(host: str) -> bool:
-    return (host or "").strip().lower() in _PUBLIC_BIND_HOSTS
-
-
-def _warn_if_public_webui_without_auth(host: str) -> None:
-    if not _is_public_bind_host(host):
-        return
-
-    from src.auth import is_auth_enabled
-
-    if is_auth_enabled():
-        return
-    logger.warning(
-        "WEBUI_HOST=%s binds the Web UI to a public interface while "
-        "ADMIN_AUTH_ENABLED=false. Keep this service behind a trusted network "
-        "boundary or enable admin authentication before exposing it.",
-        host,
-    )
-
-
-def _resolve_web_service_bind(args: argparse.Namespace, config: Config) -> Tuple[str, int]:
-    """Resolve the effective Web/API bind address from CLI first, then config."""
-    host = args.host if args.host is not None else (config.webui_host or "127.0.0.1")
-    port = args.port if args.port is not None else config.webui_port
-    return host, port
 
 
 def _read_active_env_values() -> Optional[Dict[str, str]]:
@@ -366,44 +335,6 @@ def parse_arguments() -> argparse.Namespace:
         '--force-run',
         action='store_true',
         help='跳过交易日检查，强制执行全量分析（Issue #373）'
-    )
-
-    parser.add_argument(
-        '--webui',
-        action='store_true',
-        help='启动 Web 管理界面'
-    )
-
-    parser.add_argument(
-        '--webui-only',
-        action='store_true',
-        help='仅启动 Web 服务，不执行自动分析'
-    )
-
-    parser.add_argument(
-        '--serve',
-        action='store_true',
-        help='启动 FastAPI 后端服务（同时执行分析任务）'
-    )
-
-    parser.add_argument(
-        '--serve-only',
-        action='store_true',
-        help='仅启动 FastAPI 后端服务，不自动执行分析'
-    )
-
-    parser.add_argument(
-        '--port',
-        type=int,
-        default=None,
-        help='FastAPI 服务端口（默认使用 WEBUI_PORT，未配置时为 8000）'
-    )
-
-    parser.add_argument(
-        '--host',
-        type=str,
-        default=None,
-        help='FastAPI 服务监听地址（默认使用 WEBUI_HOST，未配置时为 127.0.0.1）'
     )
 
     parser.add_argument(
@@ -1084,163 +1015,6 @@ def run_scheduled_analysis(
     return run_full_analysis(config, args, stock_codes, raise_errors=True)
 
 
-def _run_analysis_with_runtime_scheduler_lock(
-    config: Config,
-    args: argparse.Namespace,
-    stock_codes: Optional[List[str]] = None,
-) -> None:
-    from src.services.runtime_scheduler import run_with_global_analysis_lock
-
-    # Keep startup/triggered analysis in sync with API runtime scheduler and
-    # run-now entrypoint. Blocking is expected here because startup paths should
-    # wait for an in-flight job before returning a response.
-    run_with_global_analysis_lock(
-        task_runner=run_full_analysis,
-        config=config,
-        args=args,
-        stock_codes=stock_codes,
-        blocking=True,
-    )
-
-
-def start_api_server(host: str, port: int, config: Config) -> None:
-    """
-    在后台线程启动 FastAPI 服务
-
-    Args:
-        host: 监听地址
-        port: 监听端口
-        config: 配置对象
-    """
-    import socket
-    import threading
-    import uvicorn
-
-    probe = socket.socket(socket.AF_INET6 if ":" in host else socket.AF_INET, socket.SOCK_STREAM)
-    # The WebUI is restarted by systemd while browsers may still have active
-    # keep-alive connections. Reuse the address during the short TCP
-    # TIME_WAIT window so a clean restart is not misreported as a port clash.
-    probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    try:
-        probe.bind((host, port))
-    except OSError as exc:
-        raise RuntimeError(f"FastAPI port is not available: {host}:{port}") from exc
-    finally:
-        probe.close()
-
-    level_name = (config.log_level or "INFO").lower()
-    use_config_signal_handlers = True
-    uvicorn_kwargs = {
-        "host": host,
-        "port": port,
-        "log_level": level_name,
-        "log_config": None,
-    }
-    # Import the ASGI app object in the calling thread instead of handing uvicorn
-    # the "api.app:app" import string. With the string, uvicorn imports the app
-    # lazily inside the server thread, and that import (litellm + the full app
-    # tree, ~10s+ on constrained hosts) runs inside the startup probe window
-    # below, tripping the 3.0s timeout and causing a restart loop on slower
-    # machines. Importing first keeps the heavy work out of the probe window;
-    # genuine import failures still surface immediately to the caller.
-    from api.app import app as fastapi_app
-
-    try:
-        uvicorn_config = uvicorn.Config(
-            fastapi_app,
-            install_signal_handlers=False,
-            **uvicorn_kwargs,
-        )
-    except TypeError:
-        # Older uvicorn versions do not accept install_signal_handlers in
-        # Config; fall back and only disable signal handling via Server attribute
-        # when it's a boolean flag.
-        use_config_signal_handlers = False
-        uvicorn_config = uvicorn.Config(
-            fastapi_app,
-            **uvicorn_kwargs,
-        )
-    uvicorn_server = uvicorn.Server(config=uvicorn_config)
-    if not use_config_signal_handlers:
-        install_signal_handlers = getattr(uvicorn_server, "install_signal_handlers", None)
-        if isinstance(install_signal_handlers, bool):
-            uvicorn_server.install_signal_handlers = False
-
-    startup_error: list[BaseException] = []
-
-    def run_server():
-        try:
-            uvicorn_server.run()
-        except Exception as exc:  # noqa: BLE001 - surface startup issues to caller promptly
-            startup_error.append(exc)
-
-    thread = threading.Thread(target=run_server, daemon=True)
-    thread.start()
-
-    timeout_seconds = 3.0
-    wait_deadline = time.time() + timeout_seconds
-    while time.time() < wait_deadline:
-        if startup_error:
-            raise RuntimeError(
-                f"FastAPI server failed to start: {host}:{port}; {startup_error[0]}"
-            )
-        if uvicorn_server.started:
-            logger.info(f"FastAPI 服务已启动: http://{host}:{port}")
-            return
-        if not thread.is_alive():
-            break
-        time.sleep(0.05)
-
-    if startup_error:
-        raise RuntimeError(f"FastAPI server failed to start: {host}:{port}; {startup_error[0]}")
-    if uvicorn_server.started:
-        logger.info(f"FastAPI 服务已启动: http://{host}:{port}")
-        return
-    if not thread.is_alive():
-        raise RuntimeError(f"FastAPI 服务器启动后立即退出: {host}:{port}")
-
-    raise RuntimeError(f"FastAPI 服务在 {timeout_seconds:.1f}s 内未完成启动: {host}:{port}")
-
-
-def _is_truthy_env(var_name: str, default: str = "true") -> bool:
-    """Parse common truthy / falsy environment values."""
-    value = os.getenv(var_name, default).strip().lower()
-    return value not in {"0", "false", "no", "off"}
-
-
-def start_bot_stream_clients(config: Config) -> None:
-    """Start bot stream clients when enabled in config."""
-    # 启动钉钉 Stream 客户端
-    if config.dingtalk_stream_enabled:
-        try:
-            from bot.platforms import start_dingtalk_stream_background, DINGTALK_STREAM_AVAILABLE
-            if DINGTALK_STREAM_AVAILABLE:
-                if start_dingtalk_stream_background():
-                    logger.info("[Main] Dingtalk Stream client started in background.")
-                else:
-                    logger.warning("[Main] Dingtalk Stream client failed to start.")
-            else:
-                logger.warning("[Main] Dingtalk Stream enabled but SDK is missing.")
-                logger.warning("[Main] Run: pip install dingtalk-stream")
-        except Exception as exc:
-            logger.error(f"[Main] Failed to start Dingtalk Stream client: {exc}")
-
-    # 启动飞书 Stream 客户端
-    if getattr(config, 'feishu_stream_enabled', False):
-        try:
-            from bot.platforms import start_feishu_stream_background, FEISHU_SDK_AVAILABLE
-            if FEISHU_SDK_AVAILABLE:
-                if start_feishu_stream_background():
-                    logger.info("[Main] Feishu Stream client started in background.")
-                else:
-                    logger.warning("[Main] Feishu Stream client failed to start.")
-            else:
-                logger.warning("[Main] Feishu Stream enabled but SDK is missing.")
-                logger.warning("[Main] Run: pip install lark-oapi")
-        except Exception as exc:
-            logger.error(f"[Main] Failed to start Feishu Stream client: {exc}")
-
-
 def _resolve_scheduled_stock_codes(stock_codes: Optional[List[str]]) -> Optional[List[str]]:
     """Scheduled runs should always read the latest persisted watchlist."""
     if stock_codes is not None:
@@ -1262,9 +1036,9 @@ def _build_schedule_time_provider(default_schedule_time: str):
 
     Fallback order:
     1. Process-level env override (set before launch) → honour it.
-    2. Persisted config file value (written by WebUI) → use it.
+    2. Persisted config file value → use it.
     3. Documented system default ``"18:00"`` → always fall back here so
-       that clearing SCHEDULE_TIME in WebUI correctly resets the schedule.
+       that clearing SCHEDULE_TIME correctly resets the schedule.
     """
     from src.core.config_manager import ConfigManager
 
@@ -1381,97 +1155,6 @@ def main() -> int:
         if getattr(args, "portfolio", None):
             logger.info("同时指定了 --portfolio；实际分析时 portfolio 将覆盖 --stocks")
 
-    # === 处理 --webui / --webui-only 参数，映射到 --serve / --serve-only ===
-    if args.webui:
-        args.serve = True
-    if args.webui_only:
-        args.serve_only = True
-
-    # 兼容旧版 WEBUI_ENABLED 环境变量
-    if config.webui_enabled and not (args.serve or args.serve_only):
-        args.serve = True
-
-    # === 启动 Web 服务 (如果启用) ===
-    start_serve = (args.serve or args.serve_only) and os.getenv("GITHUB_ACTIONS") != "true"
-
-    if start_serve:
-        args.host, args.port = _resolve_web_service_bind(args, config)
-        _warn_if_public_webui_without_auth(args.host)
-
-    bot_clients_started = False
-    if start_serve:
-        from src.services.runtime_scheduler import (
-            CLI_SCHEDULER_OWNER_ENV,
-            RUNTIME_SCHEDULER_ARGS_ENV,
-            RUNTIME_SCHEDULER_FORCE_ENABLED_ENV,
-            RUNTIME_SCHEDULER_RUN_IMMEDIATELY_ENV,
-            RUNTIME_SCHEDULER_SUPPRESS_START_ENV,
-        )
-
-        # The API runtime scheduler owns schedules once the Web/API service starts.
-        # This keeps Web settings, status, and run-now actions attached to the real
-        # scheduler instead of a separate CLI loop.
-        os.environ.pop(CLI_SCHEDULER_OWNER_ENV, None)
-        if args.serve_only:
-            os.environ[RUNTIME_SCHEDULER_SUPPRESS_START_ENV] = "true"
-        else:
-            os.environ.pop(RUNTIME_SCHEDULER_SUPPRESS_START_ENV, None)
-        runtime_schedule_requested = not args.serve_only and (
-            args.schedule or config.schedule_enabled
-        )
-        if not args.serve_only and args.schedule:
-            os.environ[RUNTIME_SCHEDULER_FORCE_ENABLED_ENV] = "true"
-        else:
-            os.environ.pop(RUNTIME_SCHEDULER_FORCE_ENABLED_ENV, None)
-        if runtime_schedule_requested:
-            runtime_run_immediately = config.schedule_run_immediately
-            if getattr(args, 'no_run_immediately', False):
-                runtime_run_immediately = False
-            os.environ[RUNTIME_SCHEDULER_RUN_IMMEDIATELY_ENV] = (
-                "true" if runtime_run_immediately else "false"
-            )
-        else:
-            os.environ.pop(RUNTIME_SCHEDULER_RUN_IMMEDIATELY_ENV, None)
-        runtime_scheduler_args = {
-            "no_notify": bool(getattr(args, "no_notify", False)),
-            "no_market_review": bool(getattr(args, "no_market_review", False)),
-            "dry_run": bool(getattr(args, "dry_run", False)),
-            "force_run": bool(getattr(args, "force_run", False)),
-            "single_notify": bool(getattr(args, "single_notify", False)),
-            "no_context_snapshot": bool(getattr(args, "no_context_snapshot", False)),
-            "workers": getattr(args, "workers", None),
-        }
-        if getattr(args, "portfolio", None):
-            runtime_scheduler_args["portfolio"] = args.portfolio
-        os.environ[RUNTIME_SCHEDULER_ARGS_ENV] = json.dumps(runtime_scheduler_args)
-        if not prepare_webui_frontend_assets():
-            logger.warning("前端静态资源未就绪，继续启动 FastAPI 服务（Web 页面可能不可用）")
-        try:
-            start_api_server(host=args.host, port=args.port, config=config)
-            bot_clients_started = True
-        except Exception as e:
-            logger.error(f"启动 FastAPI 服务失败: {e}")
-            if args.serve_only:
-                return 1
-            start_serve = False
-
-    if bot_clients_started:
-        start_bot_stream_clients(config)
-
-    # === 仅 Web 服务模式：不自动执行分析 ===
-    if args.serve_only:
-        logger.info("模式: 仅 Web 服务")
-        logger.info(f"Web 服务运行中: http://{args.host}:{args.port}")
-        logger.info("通过 /api/v1/analysis/analyze 接口触发分析")
-        logger.info(f"API 文档: http://{args.host}:{args.port}/docs")
-        logger.info("按 Ctrl+C 退出...")
-        try:
-            while True:
-                time.sleep(1)
-        except KeyboardInterrupt:
-            logger.info("\n用户中断，程序退出")
-        return 0
-
     try:
         # 模式0: 回测
         if getattr(args, 'backtest', False):
@@ -1527,18 +1210,6 @@ def main() -> int:
 
         # 模式2: 定时任务模式
         if args.schedule or config.schedule_enabled:
-            if start_serve:
-                logger.info("模式: Web/API runtime scheduler")
-                logger.info(f"Web 服务运行中: http://{args.host}:{args.port}")
-                logger.info("Web/API runtime scheduler 已接管定时任务，保存设置会作用于当前进程")
-                logger.info("按 Ctrl+C 退出...")
-                try:
-                    while True:
-                        time.sleep(1)
-                except KeyboardInterrupt:
-                    logger.info("\n用户中断，程序退出")
-                return 0
-
             logger.info("模式: 定时任务")
             logger.info(f"每日执行时间: {config.schedule_time}")
 
@@ -1596,28 +1267,13 @@ def main() -> int:
         # 模式3: 正常单次运行
         if config.run_immediately:
             try:
-                _run_analysis_with_runtime_scheduler_lock(config, args, stock_codes)
+                run_full_analysis(config, args, stock_codes)
             except FutuPortfolioError as exc:
-                if not start_serve:
-                    raise
-                logger.exception(
-                    "Futu 持仓导入失败，Web/API 服务继续运行: %s",
-                    exc,
-                )
+                raise
         else:
             logger.info("配置为不立即运行分析 (RUN_IMMEDIATELY=false)")
 
         logger.info("\n程序执行完成")
-
-        # 如果启用了服务且是非定时任务模式，保持程序运行
-        keep_running = start_serve and not (args.schedule or config.schedule_enabled)
-        if keep_running:
-            logger.info("API 服务运行中 (按 Ctrl+C 退出)...")
-            try:
-                while True:
-                    time.sleep(1)
-            except KeyboardInterrupt:
-                pass
 
         return 0
 

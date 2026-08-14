@@ -3102,126 +3102,6 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         ],
         "warning_codes": ["restart_required", "path_must_be_writable"],
     },
-    "WEBUI_ENABLED": {
-        "title": "Web UI Enabled",
-        "description": "Startup-time compatibility flag for default WebUI/API service mode. Saving this setting does not start or stop the current process.",
-        "category": "system",
-        "data_type": "boolean",
-        "ui_control": "switch",
-        "is_sensitive": False,
-        "is_required": False,
-        "is_editable": True,
-        "default_value": "false",
-        "options": [],
-        "validation": {},
-        "display_order": 37,
-        "help_key": "settings.system.WEBUI_ENABLED",
-        "examples": [
-            "WEBUI_ENABLED=false",
-            "WEBUI_ENABLED=true",
-        ],
-        "docs": [
-            {
-                "label": "完整指南：WebUI 与 API",
-                "href": "https://github.com/ZhuLinsen/daily_stock_analysis/blob/main/docs/full-guide.md#webui-与-api-服务",
-            },
-            {
-                "label": "云服务器访问 WebUI",
-                "href": "https://github.com/ZhuLinsen/daily_stock_analysis/blob/main/docs/deploy-webui-cloud.md",
-            },
-        ],
-        "warning_codes": ["restart_required"],
-    },
-    "WEBUI_AUTO_BUILD": {
-        "title": "Web UI Auto Build",
-        "description": "Build or verify the Web frontend assets before backend WebUI startup. Disable only when assets are prebuilt.",
-        "category": "system",
-        "data_type": "boolean",
-        "ui_control": "switch",
-        "is_sensitive": False,
-        "is_required": False,
-        "is_editable": True,
-        "default_value": "true",
-        "options": [],
-        "validation": {},
-        "display_order": 38,
-        "help_key": "settings.system.WEBUI_AUTO_BUILD",
-        "examples": [
-            "WEBUI_AUTO_BUILD=true",
-            "WEBUI_AUTO_BUILD=false",
-        ],
-        "docs": [
-            {
-                "label": "完整指南：WebUI 与 API",
-                "href": "https://github.com/ZhuLinsen/daily_stock_analysis/blob/main/docs/full-guide.md#webui-与-api-服务",
-            },
-            {
-                "label": "云服务器访问 WebUI",
-                "href": "https://github.com/ZhuLinsen/daily_stock_analysis/blob/main/docs/deploy-webui-cloud.md",
-            },
-        ],
-        "warning_codes": ["restart_required", "requires_built_web_assets"],
-    },
-    "WEBUI_HOST": {
-        "title": "Web UI Host",
-        "description": "Host address for Web UI service binding.",
-        "category": "system",
-        "data_type": "string",
-        "ui_control": "text",
-        "is_sensitive": False,
-        "is_required": False,
-        "is_editable": True,
-        "default_value": "127.0.0.1",
-        "options": [],
-        "validation": {},
-        "display_order": 39,
-        "help_key": "settings.system.WEBUI_HOST",
-        "examples": [
-            "WEBUI_HOST=127.0.0.1",
-            "WEBUI_HOST=0.0.0.0",
-        ],
-        "docs": [
-            {
-                "label": "云服务器访问 WebUI",
-                "href": "https://github.com/ZhuLinsen/daily_stock_analysis/blob/main/docs/deploy-webui-cloud.md",
-            },
-            {
-                "label": "完整指南：WebUI 与 API",
-                "href": "https://github.com/ZhuLinsen/daily_stock_analysis/blob/main/docs/full-guide.md#webui-与-api-服务",
-            },
-        ],
-        "warning_codes": ["public_bind_requires_auth", "restart_required"],
-    },
-    "WEBUI_PORT": {
-        "title": "Web UI Port",
-        "description": "Port for Web UI service.",
-        "category": "system",
-        "data_type": "integer",
-        "ui_control": "number",
-        "is_sensitive": False,
-        "is_required": False,
-        "is_editable": True,
-        "default_value": "8000",
-        "options": [],
-        "validation": {"min": 1, "max": 65535},
-        "display_order": 40,
-        "help_key": "settings.system.WEBUI_PORT",
-        "examples": [
-            "WEBUI_PORT=8000",
-            "WEBUI_PORT=18000",
-        ],
-        "docs": [
-            {
-                "label": "云服务器访问 WebUI",
-                "href": "https://github.com/ZhuLinsen/daily_stock_analysis/blob/main/docs/deploy-webui-cloud.md",
-            },
-            {
-                "label": "完整指南：WebUI 与 API",
-                "href": "https://github.com/ZhuLinsen/daily_stock_analysis/blob/main/docs/full-guide.md#webui-与-api-服务",
-            },
-        ],
-        "warning_codes": ["port_mapping_required", "restart_required"],
-    },
     "RUN_IMMEDIATELY": {
         "title": "Run Immediately",
         "description": "Whether to run analysis immediately on startup (non-schedule mode).",
@@ -3274,66 +3154,6 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
             },
         ],
         "warning_codes": ["restart_required"],
-    },
-    "ADMIN_AUTH_ENABLED": {
-        "title": "Admin Auth Enabled",
-        "description": "Enable password protection for Web UI. The first visit initializes the admin password.",
-        "category": "system",
-        "data_type": "boolean",
-        "ui_control": "switch",
-        "is_sensitive": False,
-        "is_required": False,
-        "is_editable": False,
-        "default_value": "false",
-        "options": [],
-        "validation": {},
-        "display_order": 41,
-        "help_key": "settings.system.ADMIN_AUTH_ENABLED",
-        "examples": [
-            "ADMIN_AUTH_ENABLED=true",
-            "python -m src.auth reset_password",
-        ],
-        "docs": [
-            {
-                "label": "完整指南：其他配置",
-                "href": "https://github.com/ZhuLinsen/daily_stock_analysis/blob/main/docs/full-guide.md#其他配置",
-            },
-            {
-                "label": "云服务器访问 WebUI",
-                "href": "https://github.com/ZhuLinsen/daily_stock_analysis/blob/main/docs/deploy-webui-cloud.md",
-            },
-        ],
-        "warning_codes": ["public_webui_requires_auth", "auth_settings_endpoint_required"],
-    },
-    "TRUST_X_FORWARDED_FOR": {
-        "title": "Trust X-Forwarded-For",
-        "description": "Use X-Forwarded-For as the client IP behind one trusted reverse proxy.",
-        "category": "system",
-        "data_type": "boolean",
-        "ui_control": "switch",
-        "is_sensitive": False,
-        "is_required": False,
-        "is_editable": True,
-        "default_value": "false",
-        "options": [],
-        "validation": {},
-        "display_order": 42,
-        "help_key": "settings.system.TRUST_X_FORWARDED_FOR",
-        "examples": [
-            "TRUST_X_FORWARDED_FOR=false",
-            "TRUST_X_FORWARDED_FOR=true",
-        ],
-        "docs": [
-            {
-                "label": "完整指南：其他配置",
-                "href": "https://github.com/ZhuLinsen/daily_stock_analysis/blob/main/docs/full-guide.md#其他配置",
-            },
-            {
-                "label": "云服务器访问 WebUI",
-                "href": "https://github.com/ZhuLinsen/daily_stock_analysis/blob/main/docs/deploy-webui-cloud.md",
-            },
-        ],
-        "warning_codes": ["trusted_proxy_only"],
     },
     "SCHEDULE_RUN_IMMEDIATELY": {
         "title": "Schedule Run Immediately",
@@ -5041,7 +4861,7 @@ def _infer_category(key: str) -> str:
         "ASTRBOT",
     )) or "WEBHOOK" in key:
         return "notification"
-    if key.startswith(("LOG_", "SCHEDULE_", "WEBUI_", "HTTP_", "HTTPS_", "MAX_", "DEBUG", "MARKET_REVIEW_", "TRADING_DAY_", "ANALYSIS_DELAY")):
+    if key.startswith(("LOG_", "SCHEDULE_", "HTTP_", "HTTPS_", "MAX_", "DEBUG", "MARKET_REVIEW_", "TRADING_DAY_", "ANALYSIS_DELAY")):
         return "system"
     return "uncategorized"
 

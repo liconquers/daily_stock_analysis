@@ -1258,11 +1258,6 @@ class Config:
     retry_base_delay: float = 1.0
     retry_max_delay: float = 30.0
     
-    # === WebUI 配置 ===
-    webui_enabled: bool = False
-    webui_host: str = "127.0.0.1"
-    webui_port: int = 8000
-    
     # === 机器人配置 ===
     bot_enabled: bool = True              # 是否启用机器人功能
     bot_command_prefix: str = "/"         # 命令前缀
@@ -1298,7 +1293,7 @@ class Config:
     _VALID_AGENT_ARCH = {"single", "multi"}
     _VALID_ORCHESTRATOR_MODES = {"quick", "standard", "full", "specialist"}
     _VALID_SKILL_ROUTING = {"auto", "manual"}
-    _WEBUI_RUNTIME_ENV_FILE_PRIORITY_KEYS = frozenset(
+    _RUNTIME_ENV_FILE_PRIORITY_KEYS = frozenset(
         {
             "STOCK_LIST",
             "RUN_IMMEDIATELY",
@@ -1368,7 +1363,7 @@ class Config:
         
         加载优先级：
         1. 大多数配置保持系统环境变量优先
-        2. WebUI 可写的运行期关键键优先复用持久化 `.env`，但保留启动时显式进程环境变量的 override
+        2. 可热加载的运行期关键键优先复用持久化 `.env`，但保留启动时显式进程环境变量的 override
         3. 代码中的默认值
         """
         cls._capture_bootstrap_runtime_env_overrides()
@@ -2161,9 +2156,6 @@ class Config:
                 os.getenv('MARKET_REVIEW_COLOR_SCHEME', 'green_up')
             ),
             trading_day_check_enabled=os.getenv('TRADING_DAY_CHECK_ENABLED', 'true').lower() != 'false',
-            webui_enabled=os.getenv('WEBUI_ENABLED', 'false').lower() == 'true',
-            webui_host=os.getenv('WEBUI_HOST', '127.0.0.1'),
-            webui_port=parse_env_int(os.getenv('WEBUI_PORT'), 8000, field_name='WEBUI_PORT', minimum=1, maximum=65535),
             # 机器人配置
             bot_enabled=os.getenv('BOT_ENABLED', 'true').lower() == 'true',
             bot_command_prefix=os.getenv('BOT_COMMAND_PREFIX', '/'),
@@ -2761,7 +2753,7 @@ class Config:
         env_value = os.getenv(key)
         file_value = cls._get_env_file_value(key)
 
-        should_prefer_file = prefer_env_file or key in cls._WEBUI_RUNTIME_ENV_FILE_PRIORITY_KEYS
+        should_prefer_file = prefer_env_file or key in cls._RUNTIME_ENV_FILE_PRIORITY_KEYS
         if should_prefer_file and file_value is not None:
             if env_value is not None and cls._has_bootstrap_runtime_env_override(key):
                 return env_value
@@ -2786,7 +2778,7 @@ class Config:
         * present with a **different** value.
 
         When both values are identical, the distinction is irrelevant and we
-        do **not** flag the key, so that a later ``.env`` update by WebUI can
+        do **not** flag the key, so that a later ``.env`` update can
         take effect on config reload without requiring a container restart.
         """
         if cls._BOOTSTRAP_RUNTIME_ENV_OVERRIDES_CAPTURED:
@@ -2794,7 +2786,7 @@ class Config:
 
         explicit_overrides = set()
         present_keys = set()
-        for key in cls._WEBUI_RUNTIME_ENV_FILE_PRIORITY_KEYS:
+        for key in cls._RUNTIME_ENV_FILE_PRIORITY_KEYS:
             env_value = os.environ.get(key)
             if env_value is None:
                 continue
