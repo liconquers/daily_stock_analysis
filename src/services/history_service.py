@@ -12,10 +12,12 @@ Responsibilities:
 from __future__ import annotations
 import json
 import logging
+import re
 from datetime import date, datetime, timedelta
 from typing import Optional, Dict, Any, List, Tuple, TYPE_CHECKING
 
 from src.config import get_config, resolve_news_window_days
+from src.formatters import markdown_to_plain_text
 from src.data.stock_index_loader import resolve_index_stock_code
 from src.report_language import (
     get_bias_status_emoji,
@@ -38,6 +40,12 @@ from src.report_language import (
 )
 from src.storage import DatabaseManager
 from src.services.run_diagnostics import build_run_diagnostic_summary
+from src.services.empty_news import (
+    empty_news_disclosure,
+    empty_news_disclosure_from_stored,
+    persisted_news_evidence_present,
+    persisted_news_result_state,
+)
 from src.market_phase_summary import (
     extract_market_phase_summary,
     rebuild_market_phase_summary_for_stock_code,
@@ -114,6 +122,39 @@ class HistoryService:
                 is_bse_code,
                 normalize_stock_code,
             )
+            from src.services.stock_code_utils import (
+                _converge_registered_csi_identity,
+            )
+
+            # PR #2267 review remediation: converge registered CSI aliases
+            # (``csi930955`` / ``930955.CSI`` / ``CSI930955``) so a record persisted under any
+            # equivalent form is reachable from every equivalent query input.
+            # This is a *persisted-read* filter path, so the candidate set must
+            # include:
+            #   1. the parser canonical (``csi930955`` — current storage form),
+            #   2. the old resolver's uppercase canonical (``CSI930955`` — how
+            #      pre-fix records were saved), and
+            #   3. the IndexEntry's explicit aliases (``930955.CSI``).
+            converged_csi = _converge_registered_csi_identity(raw_code)
+            if converged_csi is not None:
+                from src.data.stock_index_loader import _load_active_index_rows
+                active_rows = _load_active_index_rows()
+                alias_keys: List[str] = []
+                display_keys: List[str] = []
+                for row in active_rows:
+                    if row and str(row[0] or "").strip() == converged_csi:
+                        display_keys = [str(row[1] or "").strip()]
+                        alias_keys = [
+                            str(a) for a in (row[5] if isinstance(row[5], list) else [])
+                            if str(a).strip()
+                        ]
+                        break
+                canonical_upper = canonical_stock_code(converged_csi) or converged_csi.upper()
+                add_keys = [converged_csi, canonical_upper] + display_keys + alias_keys
+                for key in add_keys:
+                    if key and key not in candidates:
+                        candidates.append(key)
+                return candidates
 
             raw_canonical = canonical_stock_code(raw_code)
             normalized = canonical_stock_code(normalize_stock_code(raw_canonical))
@@ -334,6 +375,13 @@ class HistoryService:
             getattr(record, "context_snapshot", None),
         )
         action_fields = self._decision_action_fields_for_record(record, raw_result)
+        analysis_summary = record.analysis_summary
+        if getattr(record, "report_type", None) == "market_review":
+            market_review_content = self._extract_market_review_content(record, raw_result)
+            analysis_summary = self._market_review_summary(
+                record.analysis_summary,
+                market_review_content,
+            )
 
         return {
             "id": record.id,
@@ -345,7 +393,7 @@ class HistoryService:
                 getattr(record, "context_snapshot", None)
             ),
             "trend_prediction": record.trend_prediction,
-            "analysis_summary": record.analysis_summary,
+            "analysis_summary": analysis_summary,
             "sentiment_score": record.sentiment_score,
             "operation_advice": record.operation_advice,
             "action": action_fields["action"],
@@ -570,6 +618,39 @@ class HistoryService:
             return news_content
         return None
 
+    @staticmethod
+    def _market_review_summary(
+        persisted_summary: Any,
+        markdown: Any,
+        *,
+        limit: int = 120,
+    ) -> Optional[str]:
+        """Return a stable short summary without leaking report Markdown or metadata."""
+        persisted = str(persisted_summary or "").strip()
+        if persisted:
+            return persisted
+
+        source = str(markdown or "").strip()
+        if not source:
+            return None
+
+        # Full reports can contain internal reference metadata, tables, links and
+        # fenced diagnostic payloads. Keep readable prose only for summary fields.
+        source = re.sub(r"```[^\n]*\n.*?```", " ", source, flags=re.DOTALL)
+        source = re.sub(r"!\[([^\]]*)\]\([^)]*\)", r"\1", source)
+        source = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", source)
+        source = re.sub(r"<[^>]+>", " ", source)
+        text = markdown_to_plain_text(source)
+        text = re.sub(r"[`~|]", " ", text)
+        text = re.sub(r"^\s*:?-{3,}:?(?:\s+:?-{3,}:?)+\s*$", " ", text, flags=re.MULTILINE)
+        text = re.sub(r"^[+\d]+[.)]\s+", "", text, flags=re.MULTILINE)
+        text = re.sub(r"\s+", " ", text).strip(" •-—")
+        if not text:
+            return None
+        if len(text) > limit:
+            return text[:limit].rstrip() + "…"
+        return text
+
     def _record_to_detail_dict(self, record) -> Dict[str, Any]:
         """
         Convert an AnalysisHistory ORM record to a detail response dict.
@@ -587,9 +668,23 @@ class HistoryService:
             except json.JSONDecodeError:
                 context_snapshot = record.context_snapshot
 
+        report_language = normalize_report_language(
+            raw_result.get("report_language") if isinstance(raw_result, dict) else None
+        )
+        news_disclosure = empty_news_disclosure_from_stored(
+            raw_result,
+            context_snapshot,
+            report_language,
+        )
+
         market_review_content = None
+        analysis_summary = record.analysis_summary
         if getattr(record, "report_type", None) == "market_review":
             market_review_content = self._extract_market_review_content(record, raw_result)
+            analysis_summary = self._market_review_summary(
+                record.analysis_summary,
+                market_review_content,
+            )
 
         action_fields = self._decision_action_fields_for_record(record, raw_result)
         display_code = self._display_stock_code(record.code)
@@ -603,7 +698,7 @@ class HistoryService:
             "report_type": record.report_type,
             "created_at": self._serialize_created_at(record.created_at),
             "model_used": model_used,
-            "analysis_summary": market_review_content or record.analysis_summary,
+            "analysis_summary": analysis_summary,
             "operation_advice": record.operation_advice,
             "action": action_fields["action"],
             "action_label": action_fields["action_label"],
@@ -615,6 +710,7 @@ class HistoryService:
             "stop_loss": sniper_points.get("stop_loss"),
             "take_profit": sniper_points.get("take_profit"),
             "news_content": market_review_content or record.news_content,
+            "empty_news_disclosure": news_disclosure,
             "raw_result": raw_result,
             "context_snapshot": context_snapshot,
             "market_phase_summary": market_phase_summary,
@@ -868,6 +964,11 @@ class HistoryService:
             from src.analyzer import AnalysisResult
             # Extract dashboard data if available
             dashboard = raw_result.get("dashboard", {})
+            context_snapshot = parse_json_field(getattr(record, "context_snapshot", None))
+            news_result_count, news_result_count_known = persisted_news_result_state(
+                raw_result,
+                context_snapshot,
+            )
 
             # Build AnalysisResult with available data
             result = AnalysisResult(
@@ -901,6 +1002,11 @@ class HistoryService:
                 buy_reason=raw_result.get("buy_reason", ""),
                 market_snapshot=raw_result.get("market_snapshot"),
                 search_performed=raw_result.get("search_performed", False),
+                news_result_count=news_result_count,
+                news_result_count_known=news_result_count_known,
+                news_evidence_present=persisted_news_evidence_present(
+                    raw_result, news_result_count
+                ),
                 data_sources=raw_result.get("data_sources", ""),
                 success=raw_result.get("success", True),
                 error_message=raw_result.get("error_message"),
@@ -972,6 +1078,10 @@ class HistoryService:
             "---",
             "",
         ]
+
+        news_disclosure = empty_news_disclosure(result, report_language)
+        if news_disclosure:
+            report_lines.extend([news_disclosure, ""])
 
         # ========== 舆情与基本面概览（放在最前面）==========
         intel = dashboard.get('intelligence', {}) if dashboard else {}
