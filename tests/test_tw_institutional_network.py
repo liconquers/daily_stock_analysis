@@ -13,9 +13,17 @@ tests. Drift fails LOUD; a transport error, non-trading day, or transient blip s
 so the cron is not noisy. A 200 that is NOT JSON (maintenance page / URL migration) is
 DRIFT, not a blip, so it fails — never skipped. Both feeds are public 政府開放資料, no creds.
 
+Two-snapshot race guard: the cron fires at 02:00 UTC (= 10:00 Taipei, MID-SESSION) and the
+feeds carry LIVE provisional figures that update between two requests; TWSE's load
+balancers have also served different "latest" days to near-simultaneous requests. The T86
+test therefore pins BOTH fetches to the previous Taipei trading day (final, immutable
+data, and the date-qualified URL kills the stale "latest" node), and the TPEx test
+re-fetches the raw feed on any mismatch to tell a mid-test feed update from real drift.
+
 For the richer human-readable cross-check, see tests/tw_institutional_live_smoke.py.
 """
 
+import datetime as _dt
 import os
 import sys
 import unittest
@@ -27,6 +35,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from data_provider.tw_institutional_fetcher import (  # noqa: E402
     TwInstitutionalFetcher,
     _to_int,
+    minguo_to_ad,
     _T86_CORE,
     _T86_CODE,
     _T86_FOREIGN,
@@ -47,12 +56,30 @@ import requests  # noqa: E402
 _HEADERS = {"User-Agent": _UA, "Accept": "application/json"}
 _NET_FIELDS = ("foreign_net", "trust_net", "dealer_net", "total_net")
 
+_TW_UTC_OFFSET = _dt.timedelta(hours=8)
 
-def _fetch_with_retry(fetcher, code, tries=3):
+
+def _taipei_prev_trading_day() -> str:
+    """Latest Taipei weekday STRICTLY BEFORE today, as ``YYYYMMDD``.
+
+    TWSE finalizes T86 only after the session; today's feed is provisional during
+    trading hours (10:00 Taipei when the cron fires) and can be revised in the
+    evening. Yesterday's data is final and immutable, so comparing the raw feed and
+    the fetcher against it removes the two-snapshot race. A Taiwan holiday leaves
+    that date's feed empty and the test skips quietly downstream.
+    """
+    taipei_now = _dt.datetime.now(_dt.timezone(_TW_UTC_OFFSET))
+    day = taipei_now.date() - _dt.timedelta(days=1)
+    while day.weekday() >= 5:  # Sat=5, Sun=6
+        day -= _dt.timedelta(days=1)
+    return day.strftime("%Y%m%d")
+
+
+def _fetch_with_retry(fetcher, code, date=None, tries=3):
     """Transient upstream blips are real (observed live); retry before giving up."""
     rec = None
     for _ in range(tries):
-        rec = fetcher.get_institutional_net(code)
+        rec = fetcher.get_institutional_net(code, date)
         if rec is not None:
             return rec
     return rec
@@ -83,13 +110,24 @@ class TestTwInstitutionalLiveNetwork(unittest.TestCase):
 
     def test_t86_live_columns_and_fetcher_match_raw(self):
         """T86 core columns still named as expected AND the fetcher's parsed net figures
-        equal the raw columns for a liquid stock (catches a fabricated fallback total)."""
+        equal the raw columns for a liquid stock (catches a fabricated fallback total).
+
+        Both requests are pinned to the PREVIOUS Taipei trading day (final data): the
+        cron runs mid-session and the T86 "latest" feed is provisional + load-balanced,
+        so two near-simultaneous requests can legitimately see different figures for the
+        current day. Pinning also makes the fetcher's record date checkable.
+        """
+        pinned = _taipei_prev_trading_day()
         payload = self._get_feed_or_skip(
-            _T86_URL, {"response": "json", "selectType": "ALLBUT0999"})
+            _T86_URL, {"response": "json", "selectType": "ALLBUT0999", "date": pinned})
         if not isinstance(payload, dict):
             self.fail(f"T86 response not a JSON object: {type(payload).__name__} (feed shape drift)")
         if payload.get("stat") != "OK":
             self.skipTest(f"T86 stat={payload.get('stat')} (likely non-trading day)")
+        if str(payload.get("date")) != pinned:
+            # TWSE echoes the requested date; a different one is holiday oddity or a
+            # URL-migration sign — soft-skip (the fetcher date assert below is the loud one).
+            self.skipTest(f"T86 feed date {payload.get('date')!r} != pinned {pinned}")
         fields = payload.get("fields") or []
         missing = [name for name in _T86_CORE if name not in fields]
         self.assertEqual(missing, [], f"TWSE T86 core columns renamed/removed: {missing}")
@@ -97,7 +135,7 @@ class TestTwInstitutionalLiveNetwork(unittest.TestCase):
         idx = {name: fields.index(name) for name in fields}
         row = next((r for r in (payload.get("data") or [])
                     if isinstance(r, (list, tuple)) and str(r[idx[_T86_CODE]]).strip() == "2330"), None)
-        rec = _fetch_with_retry(TwInstitutionalFetcher(), "2330.TW")
+        rec = _fetch_with_retry(TwInstitutionalFetcher(), "2330.TW", date=pinned)
         if rec is None:
             # row present in the raw feed but the fetcher returned None => parse/date drift
             # (the exact fail-open this test exists to catch) -> FAIL, never a soft-skip.
@@ -108,6 +146,12 @@ class TestTwInstitutionalLiveNetwork(unittest.TestCase):
         if row is None:
             self.skipTest("2330 not in the raw T86 snapshot (cross-check unavailable)")
         self._assert_record_shape(rec, "上市")
+        # The fetcher must echo the date it was asked for; a different date means the
+        # feed ignored the param (or the fetcher's date attribution drifted) and would
+        # ship wrong-day figures into reports — FAIL LOUD.
+        self.assertEqual(
+            rec["date"], pinned,
+            f"fetcher attributed {rec['date']} but {pinned} was requested (date drift)")
         self.assertEqual(rec["foreign_net"], _to_int(row[idx[_T86_FOREIGN]]))
         self.assertEqual(rec["trust_net"], _to_int(row[idx[_T86_TRUST]]))
         self.assertEqual(rec["dealer_net"], _to_int(row[idx[_T86_DEALER]]))
@@ -117,7 +161,14 @@ class TestTwInstitutionalLiveNetwork(unittest.TestCase):
 
     def test_tpex_live_columns_and_fetcher_match_raw(self):
         """TPEx core keys still present AND the fetcher's parsed net figures equal the raw
-        columns for a liquid stock (catches a fabricated fallback total)."""
+        columns for a liquid stock (catches a fabricated fallback total).
+
+        The TPEx OpenAPI serves ONLY the latest trading day (no date param), and during
+        the session its provisional figures update between requests. On any mismatch the
+        raw feed is re-fetched: if the raw figure moved to match the fetcher, the feed
+        updated mid-test (race, not drift) -> skip; if it stayed put, the fetcher
+        mis-parses -> fail LOUD.
+        """
         arr = self._get_feed_or_skip(_TPEX_URL)
         if not isinstance(arr, list):
             self.fail(f"TPEx response not a JSON array: {type(arr).__name__} (feed shape drift)")
@@ -129,8 +180,12 @@ class TestTwInstitutionalLiveNetwork(unittest.TestCase):
         missing = [k for k in core_keys if k not in arr[0]]
         self.assertEqual(missing, [], f"TPEx core keys renamed/removed: {missing}")
 
-        raw = next((r for r in arr
-                    if isinstance(r, dict) and str(r.get("SecuritiesCompanyCode", "")).strip() == "5483"), None)
+        def _row_of(records):
+            return next((r for r in records
+                         if isinstance(r, dict)
+                         and str(r.get("SecuritiesCompanyCode", "")).strip() == "5483"), None)
+
+        raw = _row_of(arr)
         rec = _fetch_with_retry(TwInstitutionalFetcher(), "5483.TWO")
         if rec is None:
             # row present in the raw feed but the fetcher returned None => parse/date drift
@@ -142,10 +197,32 @@ class TestTwInstitutionalLiveNetwork(unittest.TestCase):
         if raw is None:
             self.skipTest("5483 not in the raw TPEx snapshot (cross-check unavailable)")
         self._assert_record_shape(rec, "上櫃")
-        self.assertEqual(rec["foreign_net"], _to_int(raw.get(_TPEX_FOREIGN_EXCL)))
-        self.assertEqual(rec["trust_net"], _to_int(raw.get(_TPEX_TRUST)))
-        self.assertEqual(rec["dealer_net"], _to_int(raw.get(_TPEX_DEALER)))
-        self.assertEqual(rec["total_net"], _to_int(raw.get(_TPEX_TOTAL)))
+
+        raw_date = minguo_to_ad(raw.get("Date", ""))
+        if raw_date and rec.get("date") != raw_date:
+            # Different-day records between the two requests = load-balancer race.
+            self.skipTest(
+                f"TPEx 5483 different days between snapshots: raw {raw_date} vs fetcher {rec.get('date')}")
+
+        raw_field_map = (
+            ("foreign_net", _TPEX_FOREIGN_EXCL),
+            ("trust_net", _TPEX_TRUST),
+            ("dealer_net", _TPEX_DEALER),
+            ("total_net", _TPEX_TOTAL),
+        )
+        for rec_field, raw_key in raw_field_map:
+            expected = _to_int(raw.get(raw_key))
+            if rec[rec_field] == expected:
+                continue
+            # Mismatch: distinguish a mid-test feed update from genuine parser drift.
+            arr2 = self._get_feed_or_skip(_TPEX_URL)
+            raw2 = _row_of(arr2)
+            if raw2 is not None and _to_int(raw2.get(raw_key)) == rec[rec_field]:
+                self.skipTest(
+                    f"TPEx {rec_field} for 5483 changed between snapshots (feed updated "
+                    f"mid-test): raw {expected} -> {_to_int(raw2.get(raw_key))}")
+            self.fail(
+                f"TPEx {rec_field} for 5483: fetcher {rec[rec_field]} != raw {expected}")
 
 
 if __name__ == "__main__":
