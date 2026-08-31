@@ -46,7 +46,7 @@ jobs:
         id: checkout
         if: steps.auth.outcome == 'success'
         continue-on-error: true
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           ref: main
           fetch-depth: 0
