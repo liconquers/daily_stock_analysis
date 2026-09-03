@@ -39,7 +39,8 @@ import type {
 } from '../types/analysis';
 import type { RunFlowSnapshotSource } from '../types/runFlow';
 import { getTodayInShanghai } from '../utils/format';
-import { normalizeStockCode } from '../utils/stockCode';
+import { useStockIndex } from '../hooks/useStockIndex';
+import { resolveRegisteredIndexCanonical, toAssetAwareCodeKey, type AssetAwareAssetType } from '../utils/stockCode';
 
 type MarketReviewNotice = {
   variant: 'success' | 'warning' | 'danger';
@@ -143,9 +144,10 @@ function shiftDateKey(dateKey: string, days: number): string {
   return date.toISOString().slice(0, 10);
 }
 
-function getStockCodeKey(code?: string | null): string {
-  const trimmed = (code ?? '').trim();
-  return trimmed ? normalizeStockCode(trimmed).toUpperCase() : '';
+function getStockCodeKey(code?: string | null, assetType?: AssetAwareAssetType | null): string {
+  // Direct delegation: `toAssetAwareCodeKey` already treats unknown/stock codes
+  // with the existing stock normalization, so no extra branching is needed.
+  return toAssetAwareCodeKey(code, assetType);
 }
 
 function chunkStockCodes(codes: string[]): string[][] {
@@ -181,14 +183,15 @@ function writeTaskPanelCollapsedPreference(collapsed: boolean): void {
   }
 }
 
-function countBatchAccepted(result: AnalyzeAsyncResponse): { accepted: number; duplicates: number } {
+function countBatchAccepted(result: AnalyzeAsyncResponse): { accepted: number; duplicates: number; rejected: number } {
   if ('accepted' in result) {
     return {
       accepted: result.accepted.length,
       duplicates: result.duplicates.length,
+      rejected: result.rejected?.length ?? 0,
     };
   }
-  return { accepted: 1, duplicates: 0 };
+  return { accepted: 1, duplicates: 0, rejected: 0 };
 }
 
 function toStockBarItemFromHistoryItem(item: HistoryItem): StockBarItem {
@@ -205,6 +208,7 @@ function toStockBarItemFromHistoryItem(item: HistoryItem): StockBarItem {
     lastAnalysisTime: item.createdAt,
     modelUsed: item.modelUsed,
     marketPhaseSummary: item.marketPhaseSummary ?? null,
+    assetType: item.assetType,
   };
 }
 
@@ -249,6 +253,40 @@ const HomePage: React.FC = () => {
   const navigate = useNavigate();
   const location = useLocation();
   const { language: uiLanguage, t } = useUiLanguage();
+  const {
+    index: stockIndexItems,
+    fallback: isStockIndexFallback,
+    loaded: isStockIndexLoaded,
+  } = useStockIndex();
+  // Registry is "ready" once loaded — or once an explicit fallback happened
+  // (load failure), which keeps the existing fail-open stock semantics.
+  const isStockIndexReady = isStockIndexLoaded || isStockIndexFallback;
+
+  // PR #2312: raw watchlist strings carry no asset type — only an exact
+  // canonical/display/alias hit on a loaded ``assetType=index`` registry row
+  // buckets the code as an index; anything else keeps the legacy stock
+  // normalization (fail-open). Backend-tagged items/tasks/reports never touch
+  // the registry — they use their explicit asset type directly.
+  const getWatchlistCodeIdentity = useCallback(
+    (code: string | null | undefined): { key: string; assetType: AssetAwareAssetType } => {
+      const trimmed = (code ?? '').trim();
+      if (!trimmed) {
+        return { key: '', assetType: 'stock' };
+      }
+      const indexCanonical = resolveRegisteredIndexCanonical(stockIndexItems, trimmed);
+      if (indexCanonical) {
+        return { key: indexCanonical, assetType: 'index' };
+      }
+      return { key: getStockCodeKey(trimmed, 'stock'), assetType: 'stock' };
+    },
+    [stockIndexItems],
+  );
+
+  const getWatchlistCodeKey = useCallback(
+    (code: string | null | undefined): string => getWatchlistCodeIdentity(code).key,
+    [getWatchlistCodeIdentity],
+  );
+
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [isSubmittingMarketReview, setIsSubmittingMarketReview] = useState(false);
   const [marketReviewNotice, setMarketReviewNotice] = useState<MarketReviewNotice>(null);
@@ -607,7 +645,7 @@ const HomePage: React.FC = () => {
     if (task.reportType === 'market_review') {
       return;
     }
-    const key = getStockCodeKey(task.stockCode);
+    const key = getStockCodeKey(task.stockCode, task.assetType);
     if (!key) {
       return;
     }
@@ -622,7 +660,7 @@ const HomePage: React.FC = () => {
     if (task.reportType === 'market_review') {
       return;
     }
-    const key = getStockCodeKey(task.stockCode);
+    const key = getStockCodeKey(task.stockCode, task.assetType);
     if (key) {
       setCompletedTaskRefreshPendingCounts((current) => {
         const pendingCount = current.get(key) ?? 0;
@@ -678,14 +716,14 @@ const HomePage: React.FC = () => {
   const watchlistCodesByNormalized = useMemo(() => {
     const codesByNormalized = new Map<string, string>();
     for (const code of watchlistState.watchlistCodes) {
-      const key = getStockCodeKey(code);
+      const key = getWatchlistCodeKey(code);
       if (!key || key === 'MARKET' || codesByNormalized.has(key)) {
         continue;
       }
       codesByNormalized.set(key, code);
     }
     return Array.from(codesByNormalized.entries());
-  }, [watchlistState.watchlistCodes]);
+  }, [getWatchlistCodeKey, watchlistState.watchlistCodes]);
 
   const stockBarItemByCode = useMemo(() => {
     const itemsByCode = new Map<string, StockBarItem>();
@@ -693,7 +731,7 @@ const HomePage: React.FC = () => {
       if (item.stockCode === 'MARKET') {
         continue;
       }
-      const key = getStockCodeKey(item.stockCode);
+      const key = getStockCodeKey(item.stockCode, item.assetType);
       if (key) {
         itemsByCode.set(key, item);
       }
@@ -701,7 +739,12 @@ const HomePage: React.FC = () => {
     return itemsByCode;
   }, [stockBarItems]);
 
-  const canLookupWatchlistHistory = !isLoadingStockBar && isStockBarInitialLoadSettled;
+  // Watchlist identity resolution must never run while the stock index registry
+  // is still loading: a raw index string (`sh000016`) would transiently fall
+  // into the stock bucket and cross-link with the same-code stock. The lookup
+  // stays off until the registry is loaded (or an explicit fallback happened),
+  // at which point the existing fail-open semantics apply.
+  const canLookupWatchlistHistory = isStockIndexReady && !isLoadingStockBar && isStockBarInitialLoadSettled;
 
   const watchlistMissingHistoryEntries = useMemo(
     () => (
@@ -752,7 +795,7 @@ const HomePage: React.FC = () => {
         const next = new Map<string, StockBarItem>();
         const failedKeys = new Set<string>();
         for (const entry of results) {
-          const key = getStockCodeKey(entry.code);
+          const key = getWatchlistCodeKey(entry.code);
           if (!key) {
             continue;
           }
@@ -786,7 +829,7 @@ const HomePage: React.FC = () => {
       isCanceled = true;
       abortController.abort();
     };
-  }, [canLookupWatchlistHistory, watchlistHistoryRetryVersion, watchlistMissingHistoryEntries, watchlistMissingHistorySignature]);
+  }, [canLookupWatchlistHistory, getWatchlistCodeKey, watchlistHistoryRetryVersion, watchlistMissingHistoryEntries, watchlistMissingHistorySignature]);
 
   const clearMarketReviewState = useCallback(() => {
     stopMarketReviewPolling();
@@ -1105,7 +1148,7 @@ const HomePage: React.FC = () => {
       if (task.reportType === 'market_review') {
         continue;
       }
-      const key = getStockCodeKey(task.stockCode);
+      const key = getStockCodeKey(task.stockCode, task.assetType);
       if (key) {
         tasksByCode.set(key, task);
       }
@@ -1115,7 +1158,8 @@ const HomePage: React.FC = () => {
 
   const watchlistRows = useMemo<HomeWatchlistRow[]>(() => (
     watchlistState.watchlistCodes.map((code) => {
-      const key = getStockCodeKey(code);
+      const identity = getWatchlistCodeIdentity(code);
+      const key = identity.key;
       const latestItemCandidate = key
         ? stockBarItemByCode.get(key) ?? watchlistHistoryItemsByCode.get(key)
         : undefined;
@@ -1149,6 +1193,11 @@ const HomePage: React.FC = () => {
         : latestItemCandidate;
       return {
         code,
+        assetType: identity.assetType,
+        // Registry-derived canonical identity: lets the workspace match a
+        // canonical selected report against an alias-form raw watchlist row
+        // (e.g. `000016.SH` -> identityKey `sh000016`) without re-parsing.
+        identityKey: identity.key,
         latestItem,
         analyzedToday: !isTodayStatusLoading && !isTodayStatusUnknown && getShanghaiDateKey(latestItem?.lastAnalysisTime) === todayDateKey,
         isTodayStatusLoading,
@@ -1162,6 +1211,7 @@ const HomePage: React.FC = () => {
     completedTaskRefreshPendingCounts,
     isLoadingStockBar,
     stockBarRefreshFailed,
+    getWatchlistCodeIdentity,
     stockBarItemByCode,
     todayDateKey,
     watchlistHistoryItemsByCode,
@@ -1236,6 +1286,12 @@ const HomePage: React.FC = () => {
   }, [todayDateKey, todayHistoryItems]);
 
   const handleAnalyzeWatchlist = useCallback(async (mode: WatchlistAnalyzeMode) => {
+    // The workspace button is disabled while the registry loads, but keep this
+    // guard at the action boundary so no alternate caller can dedupe an index
+    // alias with a same-code stock using the temporary fail-open key.
+    if (!isStockIndexReady) {
+      return;
+    }
     if (mode === 'pending' && watchlistTodayStatusBlocked) {
       setBatchAnalyzeStatus({
         variant: 'warning',
@@ -1247,7 +1303,7 @@ const HomePage: React.FC = () => {
     const sourceCodes = mode === 'pending' ? pendingWatchlistCodes : watchlistState.watchlistCodes;
     const seen = new Set<string>();
     const targetCodes = sourceCodes.filter((code) => {
-      const key = getStockCodeKey(code);
+      const key = getWatchlistCodeKey(code);
       if (!key || seen.has(key)) {
         return false;
       }
@@ -1267,6 +1323,8 @@ const HomePage: React.FC = () => {
     setBatchAnalyzeStatus(null);
     let acceptedCount = 0;
     let duplicateCount = 0;
+    let rejectedCount = 0;
+    let rejectedReasons: string[] = [];
     let confirmedCodeCount = 0;
     let submissionError: ParsedApiError | null = null;
     try {
@@ -1281,7 +1339,17 @@ const HomePage: React.FC = () => {
           const counts = countBatchAccepted(result);
           acceptedCount += counts.accepted;
           duplicateCount += counts.duplicates;
-          const confirmedInChunk = counts.accepted + counts.duplicates;
+          rejectedCount += counts.rejected;
+          if (counts.rejected > 0 && 'rejected' in result && result.rejected) {
+            rejectedReasons = rejectedReasons.concat(
+              result.rejected.map((entry) => `${entry.stockCode}: ${entry.message}`),
+            );
+          }
+          // accepted + duplicates + rejected is the server's full disposition of
+          // this chunk. Rejected entries are an explicit server response (not a
+          // short/partial response), so they count toward "confirmed" and must
+          // not be mistaken for an incomplete response that halts later chunks.
+          const confirmedInChunk = counts.accepted + counts.duplicates + counts.rejected;
           confirmedCodeCount += Math.min(confirmedInChunk, chunk.length);
           if (confirmedInChunk !== chunk.length) {
             submissionError = getParsedApiError(new Error(t('watchlist.batchIncompleteResponse', {
@@ -1307,12 +1375,16 @@ const HomePage: React.FC = () => {
       setSidebarWorkspaceTab('watchlist');
 
       if (submissionError) {
-        if (acceptedCount > 0 || duplicateCount > 0) {
+        if (acceptedCount > 0 || duplicateCount > 0 || rejectedCount > 0) {
+          const partialKey = rejectedCount > 0
+            ? 'watchlist.batchPartiallySubmittedWithRejected'
+            : 'watchlist.batchPartiallySubmitted';
           setBatchAnalyzeStatus({
             variant: 'warning',
-            message: t('watchlist.batchPartiallySubmitted', {
+            message: t(partialKey, {
               accepted: acceptedCount,
               duplicates: duplicateCount,
+              rejected: rejectedCount,
               unconfirmed: targetCodes.length - confirmedCodeCount,
               error: submissionError.message || t('watchlist.batchFailed'),
             }),
@@ -1323,6 +1395,19 @@ const HomePage: React.FC = () => {
             message: submissionError.message || t('watchlist.batchFailed'),
           });
         }
+        return;
+      }
+
+      if (rejectedCount > 0) {
+        setBatchAnalyzeStatus({
+          variant: 'warning',
+          message: t('watchlist.batchSubmittedWithRejected', {
+            accepted: acceptedCount,
+            duplicates: duplicateCount,
+            rejected: rejectedCount,
+            reason: rejectedReasons[0] ?? t('watchlist.batchFailed'),
+          }),
+        });
         return;
       }
 
@@ -1343,6 +1428,8 @@ const HomePage: React.FC = () => {
       setIsBatchAnalyzingWatchlist(false);
     }
   }, [
+    getWatchlistCodeKey,
+    isStockIndexReady,
     notify,
     pendingWatchlistCodes,
     refreshActiveTasks,
@@ -1392,7 +1479,7 @@ const HomePage: React.FC = () => {
           activeTab={sidebarWorkspaceTab}
           onTabChange={setSidebarWorkspaceTab}
           watchlistRows={watchlistRows}
-          watchlistLoading={watchlistState.isLoading}
+          watchlistLoading={watchlistState.isLoading || !isStockIndexReady}
           watchlistActioning={watchlistState.isActioning}
           watchlistMessage={watchlistState.actionMessage}
           onAddToWatchlist={watchlistState.addToWatchlist}
@@ -1411,6 +1498,7 @@ const HomePage: React.FC = () => {
           scheduledCandidateRunUrl={scheduledCandidateRunUrl}
           isLoadingHistory={isLoadingStockBar}
           selectedStockCode={selectedReport?.meta.stockCode}
+          selectedAssetType={selectedReport?.meta.assetType ?? null}
           selectedRecordId={selectedReport?.meta.id}
           onHistoryItemClick={handleHistoryItemClick}
           onDeleteStock={handleDeleteStock}
@@ -1431,6 +1519,7 @@ const HomePage: React.FC = () => {
       isDeletingStock,
       isLoadingStockBar,
       isLoadingTodayAnalysisItems,
+      isStockIndexReady,
       isTaskPanelCollapsed,
       todayAnalysisLoadFailed,
       mergedStockBarItems,
@@ -1439,6 +1528,7 @@ const HomePage: React.FC = () => {
       scheduledCandidateTime,
       scheduledCandidates,
       selectedReport?.meta.id,
+      selectedReport?.meta.assetType,
       selectedReport?.meta.stockCode,
       sidebarWorkspaceTab,
       todayAnalysisItems,
