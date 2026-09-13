@@ -22,7 +22,7 @@ longbridge==0.2.74; platform_system == "Linux" and python_version < "3.12"
 # Priority 5: Longbridge OpenAPI SDK with OAuth support.
 longbridge>=4.4.1,<5; platform_system != "Linux" or python_version >= "3.12"
 tickflow>=0.1.24           # TickFlow official SDK; 0.1.24 verified for klines/get batch quotes/universes
-futu-api==10.8.6808        # Futu OpenAPI SDK for read-only --portfolio futu holdings import
+futu-api==10.10.7008        # Futu OpenAPI SDK for read-only --portfolio futu holdings import
 # The screening engine is maintained in src/services/screening.
 
 # Feishu
