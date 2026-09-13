@@ -18,7 +18,7 @@ COPY apps/dsa-web/ ./
 RUN DSA_WEB_VERSION="${DSA_WEB_VERSION}" DSA_WEB_REVISION="${DSA_WEB_REVISION}" npm run build
 
 # Pin to bookworm: wkhtmltopdf was removed from Debian testing (2025)
-FROM python:3.11-slim-bookworm
+FROM python:3.14-slim-bookworm
 
 # 设置工作目录
 WORKDIR /app
