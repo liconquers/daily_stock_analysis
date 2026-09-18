@@ -2016,6 +2016,29 @@ class TestTelegramSender(unittest.TestCase):
         self.assertFalse(result)
         self.assertEqual(mock_post.call_count, 2)
 
+    @mock.patch.object(TelegramSender, "_send_telegram_message", return_value=True)
+    def test_send_telegram_chunked_splits_on_newline_boundaries(self, mock_send_telegram_message):
+        cfg = _config(telegram_bot_token="BOT", telegram_chat_id="CHAT")
+        sender = TelegramSender(cfg)
+        # Create multiple lines that exceed limit
+        line1 = "Line1: " + "X" * 2500
+        line2 = "Line2: " + "Y" * 2500
+        content = f"{line1}\n{line2}"
+
+        result = sender._send_telegram_chunked(
+            "http://api.telegram.org",
+            "CHAT",
+            content,
+            max_length=4096,
+        )
+
+        self.assertTrue(result)
+        self.assertEqual(len(mock_send_telegram_message.call_args_list), 2)
+        sent_chunk1 = mock_send_telegram_message.call_args_list[0].args[2]
+        sent_chunk2 = mock_send_telegram_message.call_args_list[1].args[2]
+        self.assertEqual(sent_chunk1, line1)
+        self.assertEqual(sent_chunk2, line2)
+
 
 if __name__ == "__main__":
     unittest.main()

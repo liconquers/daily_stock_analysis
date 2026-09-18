@@ -163,3 +163,73 @@ def test_main_still_fails_without_configured_fallback(monkeypatch, tmp_path):
 
     with pytest.raises(RuntimeError, match="未配置可用的 STOCK_LIST"):
         MODULE.main()
+
+
+def test_select_candidates_sector_capping(monkeypatch):
+    monkeypatch.setenv("AUTO_SELECT_MAX_PER_INDUSTRY", "2")
+    # 20 stocks: first 6 are '半导体', then 4 '白酒', then 10 '银行'
+    industries = ["半导体"] * 6 + ["白酒"] * 4 + ["银行"] * 10
+    frame = _market_frame(20)
+    frame["行业"] = industries
+    # Give the first 6 stocks higher amounts so they have high scores
+    for i in range(6):
+        frame.loc[i, "成交额"] = 1_000_000_000 + (6 - i) * 100_000_000
+
+    selected = MODULE.select_candidates(frame, count=6)
+    assert len(selected) == 6
+
+    # Industry '半导体' should not exceed 2
+    semi_count = sum(1 for item in selected if item.industry == "半导体")
+    assert semi_count == 2
+    assert all(item.industry in {"半导体", "白酒", "银行"} for item in selected)
+
+
+def test_select_candidates_sector_capping_backfills_when_candidates_tight(monkeypatch):
+    monkeypatch.setenv("AUTO_SELECT_MAX_PER_INDUSTRY", "1")
+    # Only 3 stocks in total, all in '芯片'
+    frame = _market_frame(3)
+    frame["行业"] = ["芯片"] * 3
+
+    selected = MODULE.select_candidates(frame, count=3)
+    # Should backfill from overflow so that all 3 requested candidates are returned
+    assert len(selected) == 3
+    assert all(item.industry == "芯片" for item in selected)
+
+
+def test_write_reports_renders_industry_column(tmp_path):
+    candidates = [
+        MODULE.Candidate(
+            code="600519",
+            name="贵州茅台",
+            price=1500.0,
+            pct_change=2.5,
+            amount=5_000_000_000.0,
+            turnover=1.2,
+            volume_ratio=1.1,
+            speed=0.05,
+            score=88.5,
+            industry="白酒",
+        ),
+        MODULE.Candidate(
+            code="000001",
+            name="平安银行",
+            price=12.0,
+            pct_change=1.1,
+            amount=2_000_000_000.0,
+            turnover=0.8,
+            volume_ratio=0.9,
+            speed=0.02,
+            score=75.0,
+            industry="银行",
+        ),
+    ]
+    json_path = tmp_path / "candidates.json"
+    md_path = tmp_path / "candidates.md"
+
+    MODULE.write_reports(candidates, json_path, md_path)
+
+    md_content = md_path.read_text(encoding="utf-8")
+    assert "| 行业 |" in md_content
+    assert "白酒" in md_content
+    assert "银行" in md_content
+

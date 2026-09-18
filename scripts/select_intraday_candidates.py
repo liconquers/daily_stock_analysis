@@ -32,17 +32,19 @@ class Candidate:
     volume_ratio: float
     speed: float
     score: float
+    industry: str = ""
 
 
 COLUMN_ALIASES = {
     "code": ("代码", "股票代码", "code", "symbol"),
     "name": ("名称", "股票名称", "name"),
     "price": ("最新价", "现价", "price", "trade"),
-    "pct_change": ("涨跌幅", "change_percent", "pct_change", "changepercent"),
+    "pct_change": ("涨跌幅", "change_percent", "pct_change", "change_pct", "changepercent"),
     "amount": ("成交额", "amount"),
     "turnover": ("换手率", "turnover", "turnover_rate", "turnoverratio"),
     "volume_ratio": ("量比", "volume_ratio"),
     "speed": ("涨速", "speed"),
+    "industry": ("industry", "行业", "所属行业", "行业板块"),
 }
 
 
@@ -53,6 +55,8 @@ def _column(frame: pd.DataFrame, key: str) -> pd.Series:
     if key in {"speed", "turnover", "volume_ratio"}:
         neutral = 0.0 if key == "speed" else 1.0
         return pd.Series(neutral, index=frame.index)
+    if key == "industry":
+        return pd.Series("", index=frame.index)
     raise ValueError(f"行情数据缺少必要字段: {key}")
 
 
@@ -100,8 +104,19 @@ def select_candidates(raw: pd.DataFrame, count: int = 10) -> list[Candidate]:
             "turnover": _number(_column(raw, "turnover")),
             "volume_ratio": _number(_column(raw, "volume_ratio")),
             "speed": _number(_column(raw, "speed")).fillna(0.0),
+            "industry": _column(raw, "industry").astype(str).fillna("").str.strip(),
         }
     ).dropna(subset=["code", "price", "pct_change", "amount", "turnover", "volume_ratio"])
+
+    # If industry column is empty, try enriching from industry mapping service if available
+    if frame["industry"].eq("").all():
+        try:
+            from src.services.screening.industry import enrich_industry_concepts
+            enriched_df, _ = enrich_industry_concepts(frame)
+            if "industry" in enriched_df.columns:
+                frame["industry"] = enriched_df["industry"].fillna("").astype(str).str.strip()
+        except Exception:
+            pass
 
     filtered = _quality_filter(frame)
     if len(filtered) < count:
@@ -120,9 +135,34 @@ def select_candidates(raw: pd.DataFrame, count: int = 10) -> list[Candidate]:
         + _percentile(filtered["speed"]) * 10.0
     )
 
-    selected = filtered.sort_values(
+    sorted_df = filtered.sort_values(
         ["score", "amount", "pct_change"], ascending=False
-    ).head(count)
+    )
+
+    max_per_industry = int(os.getenv("AUTO_SELECT_MAX_PER_INDUSTRY", "2"))
+    if max_per_industry > 0:
+        chosen_rows = []
+        overflow_rows = []
+        industry_counts: dict[str, int] = {}
+        for row in sorted_df.itertuples(index=False):
+            ind = getattr(row, "industry", "").strip()
+            if ind and industry_counts.get(ind, 0) >= max_per_industry:
+                overflow_rows.append(row)
+                continue
+            if ind:
+                industry_counts[ind] = industry_counts.get(ind, 0) + 1
+            chosen_rows.append(row)
+            if len(chosen_rows) >= count:
+                break
+        if len(chosen_rows) < count and overflow_rows:
+            for row in overflow_rows:
+                chosen_rows.append(row)
+                if len(chosen_rows) >= count:
+                    break
+        selected = chosen_rows
+    else:
+        selected = list(sorted_df.head(count).itertuples(index=False))
+
     return [
         Candidate(
             code=row.code,
@@ -134,8 +174,9 @@ def select_candidates(raw: pd.DataFrame, count: int = 10) -> list[Candidate]:
             volume_ratio=round(float(row.volume_ratio), 2),
             speed=round(float(row.speed), 2),
             score=round(float(row.score), 2),
+            industry=getattr(row, "industry", "") or "",
         )
-        for row in selected.itertuples(index=False)
+        for row in selected
     ]
 
 
@@ -155,6 +196,24 @@ def _market_sources() -> Sequence[tuple[str, Callable[[], pd.DataFrame]]]:
     """Build full-market sources lazily so one broken package does not block fallbacks."""
 
     sources: list[tuple[str, Callable[[], pd.DataFrame]]] = []
+
+    # 1. 优先使用项目统一快照引擎（包含 Tencent 批量接口与本地缓存，在境外 GitHub Actions Runner 上稳定可用）
+    try:
+        from src.services.screening.config import DEFAULT_SNAPSHOT_SOURCE_PRIORITY
+        from src.services.screening.snapshot import fetch_snapshot_with_fallback
+
+        sources.append(
+            (
+                "snapshot_engine_tencent",
+                lambda: fetch_snapshot_with_fallback(
+                    list(DEFAULT_SNAPSHOT_SOURCE_PRIORITY),
+                    market="cn",
+                ),
+            )
+        )
+    except Exception as exc:
+        print(f"[行情源] 统一快照引擎加载不可用: {exc}", file=sys.stderr)
+
     try:
         import akshare as ak
 
@@ -224,20 +283,37 @@ def write_reports(candidates: Iterable[Candidate], json_path: Path, md_path: Pat
         json.dumps([asdict(item) for item in rows], ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    lines = [
-        "# A股盘中候选池",
-        "",
-        f"生成时间：{datetime.now(SHANGHAI_TZ):%Y-%m-%d %H:%M:%S}（北京时间）",
-        "",
-        "| 排名 | 代码 | 名称 | 最新价 | 涨跌幅 | 成交额(亿) | 换手率 | 量比 | 评分 |",
-        "|---:|---|---|---:|---:|---:|---:|---:|---:|",
-    ]
-    for rank, item in enumerate(rows, 1):
-        lines.append(
-            f"| {rank} | {item.code} | {item.name} | {item.price:.2f} | "
-            f"{item.pct_change:.2f}% | {item.amount / 100000000:.2f} | "
-            f"{item.turnover:.2f}% | {item.volume_ratio:.2f} | {item.score:.2f} |"
-        )
+    has_industry = any(item.industry for item in rows)
+    if has_industry:
+        lines = [
+            "# A股盘中候选池",
+            "",
+            f"生成时间：{datetime.now(SHANGHAI_TZ):%Y-%m-%d %H:%M:%S}（北京时间）",
+            "",
+            "| 排名 | 代码 | 名称 | 行业 | 最新价 | 涨跌幅 | 成交额(亿) | 换手率 | 量比 | 评分 |",
+            "|---:|---|---|---|---:|---:|---:|---:|---:|---:|",
+        ]
+        for rank, item in enumerate(rows, 1):
+            lines.append(
+                f"| {rank} | {item.code} | {item.name} | {item.industry or '-'} | {item.price:.2f} | "
+                f"{item.pct_change:.2f}% | {item.amount / 100000000:.2f} | "
+                f"{item.turnover:.2f}% | {item.volume_ratio:.2f} | {item.score:.2f} |"
+            )
+    else:
+        lines = [
+            "# A股盘中候选池",
+            "",
+            f"生成时间：{datetime.now(SHANGHAI_TZ):%Y-%m-%d %H:%M:%S}（北京时间）",
+            "",
+            "| 排名 | 代码 | 名称 | 最新价 | 涨跌幅 | 成交额(亿) | 换手率 | 量比 | 评分 |",
+            "|---:|---|---|---:|---:|---:|---:|---:|---:|",
+        ]
+        for rank, item in enumerate(rows, 1):
+            lines.append(
+                f"| {rank} | {item.code} | {item.name} | {item.price:.2f} | "
+                f"{item.pct_change:.2f}% | {item.amount / 100000000:.2f} | "
+                f"{item.turnover:.2f}% | {item.volume_ratio:.2f} | {item.score:.2f} |"
+            )
     lines.extend(
         [
             "",

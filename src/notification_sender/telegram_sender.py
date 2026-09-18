@@ -298,6 +298,31 @@ class TelegramSender:
         def _split_long_section(section: str, limit: int) -> list[str]:
             if len(section) <= limit:
                 return [section]
+            lines = section.split("\n")
+            if len(lines) > 1:
+                chunks: list[str] = []
+                cur_lines: list[str] = []
+                cur_len = 0
+                for line in lines:
+                    line_len = len(line) + (1 if cur_lines else 0)
+                    if cur_len + line_len > limit:
+                        if cur_lines:
+                            chunks.append("\n".join(cur_lines))
+                            cur_lines = []
+                            cur_len = 0
+                        if len(line) > limit:
+                            for start in range(0, len(line), limit):
+                                chunks.append(line[start:start + limit])
+                        else:
+                            cur_lines.append(line)
+                            cur_len = len(line)
+                    else:
+                        cur_lines.append(line)
+                        cur_len += line_len
+                if cur_lines:
+                    chunks.append("\n".join(cur_lines))
+                return chunks
+
             chunks: list[str] = []
             for start in range(0, len(section), limit):
                 chunks.append(section[start:start + limit])
