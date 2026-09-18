@@ -64,16 +64,16 @@ def main() -> int:
     )
     chat_type = chat_data.get("type", "unknown")
 
-    # 3. 发送测试消息
+    # 3. 发送测试消息（使用纯文本避免下划线等特殊符号破坏 Markdown 解析）
     sh_time = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M:%S")
     test_text = (
-        f"🔔 *Daily Stock Analysis 机器人连通性测试*\n\n"
+        f"🔔 Daily Stock Analysis 机器人连通性测试\n\n"
         f"• 状态：✅ 正常连通\n"
         f"• 机器人：@{bot_user} ({bot_name})\n"
         f"• 目标：{chat_title} ({chat_type})\n"
         f"• 发送时间：{sh_time}（北京时间）"
     )
-    payload = {"chat_id": chat_id, "text": test_text, "parse_mode": "Markdown"}
+    payload = {"chat_id": chat_id, "text": test_text}
     if thread_id:
         payload["message_thread_id"] = thread_id
 
