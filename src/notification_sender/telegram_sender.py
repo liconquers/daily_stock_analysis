@@ -160,11 +160,17 @@ class TelegramSender:
             if response.status_code == 200:
                 result = response.json()
                 if result.get('ok'):
-                    logger.info("Telegram 消息发送成功")
+                    msg_res = result.get('result', {})
+                    chat_info = msg_res.get('chat', {})
+                    chat_title = chat_info.get('title') or chat_info.get('username') or 'Private'
+                    chat_id_out = chat_info.get('id', chat_id)
+                    msg_id = msg_res.get('message_id', 'N/A')
+                    logger.info(f"Telegram 消息发送成功 (chat: {chat_title}, id: {chat_id_out}, msg_id: {msg_id})")
                     return True
                 else:
                     error_desc = result.get('description', '未知错误')
-                    logger.error(f"Telegram 返回错误: {error_desc}")
+                    error_code = result.get('error_code', 'unknown')
+                    logger.error(f"Telegram 返回错误 [{error_code}]: {error_desc}")
 
                     # If Markdown parsing failed, fall back to plain text
                     if self._should_fallback_to_plain_text(error_desc=error_desc):
@@ -242,7 +248,12 @@ class TelegramSender:
                 return False
 
             if result.get('ok'):
-                logger.info("Telegram 消息发送成功（纯文本）")
+                msg_res = result.get('result', {})
+                chat_info = msg_res.get('chat', {})
+                chat_title = chat_info.get('title') or chat_info.get('username') or 'Private'
+                chat_id_out = chat_info.get('id', plain_payload.get('chat_id'))
+                msg_id = msg_res.get('message_id', 'N/A')
+                logger.info(f"Telegram 消息发送成功（纯文本） (chat: {chat_title}, id: {chat_id_out}, msg_id: {msg_id})")
                 return True
 
             logger.error("Telegram 纯文本回退失败: Telegram API 返回 ok=false")
