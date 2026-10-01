@@ -6,30 +6,31 @@ services:
     plan: free
     region: singapore
     dockerCommand: python main.py --serve-only --host 0.0.0.0 --port 10000
+    healthCheckPath: /health
     envVars:
       - key: PORT
-        value: "10000"
+        value: 10000
       - key: WEBUI_PORT
-        value: "10000"
+        value: 10000
       - key: API_PORT
-        value: "10000"
+        value: 10000
       - key: WEBUI_HOST
-        value: "0.0.0.0"
+        value: 0.0.0.0
       - key: DISABLE_AKSHARE_WARMUP
-        value: "true"
+        value: true
       - key: STOCK_INDEX_REMOTE_UPDATE_ENABLED
-        value: "false"
+        value: false
       - key: MAX_WORKERS
-        value: "1"
+        value: 1
       - key: MALLOC_ARENA_MAX
-        value: "2"
+        value: 2
       - key: PYTHONMALLOC
-        value: "malloc"
+        value: malloc
       - key: GEMINI_API_KEY
-        value: "AIzaSyA60ub4R6nOIwfxVAma5bmr9YpDX2RMy68"
+        value: AIzaSyA60ub4R6nOIwfxVAma5bmr9YpDX2RMy68
       - key: TELEGRAM_BOT_TOKEN
-        value: "8713486651:AAFCrBk1NmpQvIrf_QQAAAkBh-ToKfEConE"
+        value: 8713486651:AAFCrBk1NmpQvIrf_QQAAAkBh-ToKfEConE
       - key: TELEGRAM_CHAT_ID
-        value: "6905068308"
+        value: 6905068308
       - key: TZ
-        value: "Asia/Shanghai"
+        value: Asia/Shanghai
