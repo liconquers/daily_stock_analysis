@@ -6,7 +6,7 @@ services:
       url: docker.io/zhulinsen/daily_stock_analysis:latest
     plan: free
     region: singapore
-    dockerCommand: /bin/sh -c 'python main.py --serve-only --host 0.0.0.0 --port ${PORT:-10000}'
+    dockerCommand: python main.py --serve-only --host 0.0.0.0 --port 10000
     envVars:
       - key: PORT
         value: "10000"
