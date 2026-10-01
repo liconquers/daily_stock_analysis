@@ -16,6 +16,8 @@ services:
         value: "10000"
       - key: WEBUI_HOST
         value: "0.0.0.0"
+      - key: DISABLE_AKSHARE_WARMUP
+        value: "true"
       - key: STOCK_INDEX_REMOTE_UPDATE_ENABLED
         value: "false"
       - key: MAX_WORKERS
