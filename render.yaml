@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: daily-stock-analysis-gui
+    runtime: image
+    image:
+      url: docker.io/zhulinsen/daily_stock_analysis:latest
+    plan: free
+    region: singapore
+    dockerCommand: python main.py --serve-only --host 0.0.0.0 --port 8000
+    envVars:
+      - key: PORT
+        value: "8000"
+      - key: WEBUI_HOST
+        value: "0.0.0.0"
+      - key: API_PORT
+        value: "8000"
+      - key: GEMINI_API_KEY
+        value: "AIzaSyA60ub4R6nOIwfxVAma5bmr9YpDX2RMy68"
+      - key: TELEGRAM_BOT_TOKEN
+        value: "8713486651:AAFCrBk1NmpQvIrf_QQAAAkBh-ToKfEConE"
+      - key: TELEGRAM_CHAT_ID
+        value: "6905068308"
+      - key: TZ
+        value: "Asia/Shanghai"
