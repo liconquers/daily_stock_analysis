@@ -16,6 +16,14 @@ services:
         value: "10000"
       - key: WEBUI_HOST
         value: "0.0.0.0"
+      - key: STOCK_INDEX_REMOTE_UPDATE_ENABLED
+        value: "false"
+      - key: MAX_WORKERS
+        value: "1"
+      - key: MALLOC_ARENA_MAX
+        value: "2"
+      - key: PYTHONMALLOC
+        value: "malloc"
       - key: GEMINI_API_KEY
         value: "AIzaSyA60ub4R6nOIwfxVAma5bmr9YpDX2RMy68"
       - key: TELEGRAM_BOT_TOKEN
