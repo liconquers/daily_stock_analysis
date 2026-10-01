@@ -1,9 +1,11 @@
 name: 每日股票分析
 
 on:
-  # 定时触发 - 每天北京时间 18:00 (UTC 10:00)
+  # 定时触发 - 每天三个关键时段（周一到周五）
   schedule:
-    - cron: '0 10 * * 1-5'     # 周一到周五，UTC 10:00 = 北京时间 18:00
+    - cron: '50 1 * * 1-5'     # 1. 上午 09:50 (UTC 01:50): 早盘量化荐股 Top 10
+    - cron: '30 6 * * 1-5'     # 2. 下午 14:30 (UTC 06:30): 尾盘量化荐股 Top 10
+    - cron: '20 7 * * 1-5'     # 3. 下午 15:20 (UTC 07:20): 收盘大盘复盘
   
   # 手动触发
   workflow_dispatch:
@@ -448,8 +450,35 @@ jobs:
             echo "✅ LITELLM 配置文件已写入: $LITELLM_CONFIG"
           fi
 
-          # 判断运行模式
-          MODE="${{ github.event.inputs.mode || 'full' }}"
+          # 判断运行模式（定时触发根据当前北京时间自动分流）
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            CURRENT_HOUR=$(TZ='Asia/Shanghai' date +%H)
+            if [ "$CURRENT_HOUR" -ge 15 ]; then
+              MODE="market-only"
+              echo "⏰ 当前为 15:20 收盘档 -> 自动执行【仅大盘复盘 (market-only)】"
+            elif [ "$CURRENT_HOUR" -ge 13 ]; then
+              MODE="stocks-only"
+              TIME_SLOT="afternoon"
+              echo "⏰ 当前为 14:30 尾盘档 -> 启动【尾盘缩量回踩量化荐股】"
+            else
+              MODE="stocks-only"
+              TIME_SLOT="morning"
+              echo "⏰ 当前为 09:50 早盘档 -> 启动【早盘放量突破量化荐股】"
+            fi
+          else
+            MODE="${{ github.event.inputs.mode || 'full' }}"
+            TIME_SLOT="morning"
+          fi
+
+          # 动态荐股：若为个股分析模式，动态筛选 10 支推荐个股
+          if [ "$MODE" != "market-only" ]; then
+            echo "🔍 正在从全市场量化扫描推荐 10 支股票..."
+            RECOMMENDED_STOCKS=$(python scripts/auto_pick_stocks.py --time-slot "$TIME_SLOT" --top-k 10 | tail -n 1)
+            if [ -n "$RECOMMENDED_STOCKS" ]; then
+              export STOCK_LIST="$RECOMMENDED_STOCKS"
+              echo "🎯 本次 AI 推荐股票池: $STOCK_LIST"
+            fi
+          fi
           
           echo "=========================================="
           echo "🚀 A股自选股智能分析系统"
