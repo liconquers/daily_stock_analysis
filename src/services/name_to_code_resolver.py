@@ -364,6 +364,9 @@ def warmup_akshare_cache() -> None:
     本 daemon 线程内，不阻塞调用方。重复调用共享同一在途句柄，不会
     触发多次网络拉取。
     """
+    if os.getenv("DISABLE_AKSHARE_WARMUP", "").strip().lower() in ("1", "true", "yes", "on"):
+        logger.info("[NameResolver] AkShare 预热已根据环境变量禁用，跳过后台全量拉取")
+        return
 
     def _warm():
         try:
