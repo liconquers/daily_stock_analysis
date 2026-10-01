@@ -432,20 +432,12 @@ def create_app(static_dir: Optional[Path] = None) -> FastAPI:
             """根路由 - 前端未构建时返回引导页面"""
             return HTMLResponse(content=_FRONTEND_NOT_BUILT_HTML)
     
-    @app.get(
-        "/health",
-        response_model=HealthResponse,
-        tags=["Health"],
-        summary="健康检查",
-        description="用于负载均衡器或监控系统检查服务状态"
-    )
-    @app.get(
-        "/api/health",
-        response_model=HealthResponse,
-        tags=["Health"],
-        summary="健康检查",
-        description="用于负载均衡器或监控系统检查服务状态"
-    )
+    @app.head("/", include_in_schema=False)
+    async def root_head():
+        return Response(status_code=200)
+
+    @app.api_route("/health", methods=["GET", "HEAD"], response_model=HealthResponse, tags=["Health"], summary="健康检查")
+    @app.api_route("/api/health", methods=["GET", "HEAD"], response_model=HealthResponse, tags=["Health"], summary="健康检查")
     async def health_check() -> HealthResponse:
         """健康检查接口"""
         return HealthResponse(
